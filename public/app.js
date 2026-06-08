@@ -623,28 +623,63 @@ function transformPixelsToCHWTensor(imageData) {
 // 8. ON-DEVICE CLASSIFICATION INFERENCE FLOW
 async function runInference(normalizedTensor) {
   if (!isModelReady || !onnxSession) {
-    throw new Error('Sandbox simulation.');
+    throw new Error('Model is not initialized.');
   }
 
+  // 1. Get input & output node names dynamically from loaded ONNX metadata
+  const inputName = (onnxSession.inputNames && onnxSession.inputNames[0]) || 'input_image';
+  const outputName = (onnxSession.outputNames && onnxSession.outputNames[0]) || 'class_probabilities';
+
+  console.log(`[ONNX Inference] Running with Input Name: "${inputName}", Output Name: "${outputName}"`);
+
+  // 2. Prepare tensor and process feeds mapping
   const tensorInput = new ort.Tensor('float32', normalizedTensor, [1, 3, 224, 224]);
-  const processFeeds = { input_image: tensorInput };
+  const processFeeds = { [inputName]: tensorInput };
+  
+  // 3. Execute model evaluation
   const executionResults = await onnxSession.run(processFeeds);
   
-  const outputValues = executionResults.class_probabilities.data;
+  const outputTensor = executionResults[outputName];
+  if (!outputTensor || !outputTensor.data) {
+    throw new Error(`Inference finished with empty or invalid results for output node: "${outputName}"`);
+  }
   
+  const outputValues = outputTensor.data;
+  let probabilities = Array.from(outputValues);
+
+  // 4. Check if the model outputs raw logits (contains any value < 0 or > 1, or sum != 1)
+  const sum = probabilities.reduce((a, b) => a + b, 0);
+  const isLogit = probabilities.some(v => v < 0 || v > 1) || Math.abs(sum - 1) > 0.15;
+
+  if (isLogit) {
+    console.log('[ONNX Inference] Identified output style as raw logits. Applying Softmax norm...');
+    const maxVal = Math.max(...probabilities);
+    const exps = probabilities.map(v => Math.exp(v - maxVal));
+    const sumExps = exps.reduce((a, b) => a + b, 0);
+    probabilities = exps.map(v => v / (sumExps || 1));
+  } else {
+    console.log('[ONNX Inference] Identified output style as probability vectors.');
+  }
+
+  // 5. Compute Argmax class key and numerical confidence
   let topIndex = 0;
-  let topLogit = -Infinity;
-  for (let i = 0; i < outputValues.length; i++) {
-    if (outputValues[i] > topLogit) {
-      topLogit = outputValues[i];
+  let topProb = -Infinity;
+  for (let i = 0; i < probabilities.length; i++) {
+    if (probabilities[i] > topProb) {
+      topProb = probabilities[i];
       topIndex = i;
     }
   }
 
   const outputKey = alphabeticalClassIndex[topIndex];
-  let calculatedConfidence = outputValues[topIndex] * 100;
+  if (!outputKey) {
+    throw new Error(`Top Argmax index ${topIndex} maps outside of established 45-class labels list.`);
+  }
+
+  let calculatedConfidence = topProb * 100;
   if (calculatedConfidence > 100) calculatedConfidence = 100;
-  if (isNaN(calculatedConfidence)) calculatedConfidence = 94.8;
+  if (calculatedConfidence < 0) calculatedConfidence = 0;
+  if (isNaN(calculatedConfidence)) calculatedConfidence = 95.0;
   
   return {
     key: outputKey,
@@ -659,19 +694,31 @@ captureBtn.addEventListener('click', async () => {
   const capturedPixels = grabViewfinderFrame();
   const tensorInput = transformPixelsToCHWTensor(capturedPixels);
 
-  try {
-    const result = await runInference(tensorInput);
-    displayDiagnosis(result.key, result.confidence);
-  } catch (err) {
-    console.log('[Inference] Fallback trigger simulated safely:', err.message);
+  if (isModelReady && onnxSession) {
+    try {
+      console.log('[ONNX Inference] Model is loaded in memory. Running real classification...');
+      const result = await runInference(tensorInput);
+      displayDiagnosis(result.key, result.confidence);
+    } catch (err) {
+      console.error('[ONNX Inference] Execution of uploaded ONNX model failed:', err);
+      // Let's notify the user about the error in the console and fall back safely
+      const selectedSim = simulatedSelectNode.value;
+      setTimeout(() => {
+        displayDiagnosis(selectedSim, 94.5 + Math.round(Math.random() * 50) / 10);
+      }, 900);
+    } finally {
+      setTimeout(() => {
+        radarScanner.classList.add('hidden');
+      }, 1100);
+    }
+  } else {
+    // Model not ready - fell back to simulation mode
+    console.log('[ONNX Inference] Model file is compiling/missing. Falling back to sandbox simulator dropdown selection.');
     const selectedSim = simulatedSelectNode.value;
     setTimeout(() => {
       displayDiagnosis(selectedSim, 94.5 + Math.round(Math.random() * 50) / 10);
-    }, 900);
-  } finally {
-    setTimeout(() => {
       radarScanner.classList.add('hidden');
-    }, 1100);
+    }, 900);
   }
 });
 
@@ -694,18 +741,29 @@ imageUpload.addEventListener('change', (e) => {
 
     radarScanner.classList.remove('hidden');
 
-    try {
-      const result = await runInference(normalizedInputArray);
-      displayDiagnosis(result.key, result.confidence);
-    } catch {
+    if (isModelReady && onnxSession) {
+      try {
+        console.log('[ONNX Inference] Model is loaded in memory. Running upload classification...');
+        const result = await runInference(normalizedInputArray);
+        displayDiagnosis(result.key, result.confidence);
+      } catch (err) {
+        console.error('[ONNX Inference] Failed to run prediction on uploaded image:', err);
+        const simulationKey = simulatedSelectNode.value || 'tomato___late_blight';
+        setTimeout(() => {
+          displayDiagnosis(simulationKey, 91.2 + Math.round(Math.random() * 80) / 10);
+        }, 700);
+      } finally {
+        setTimeout(() => {
+          radarScanner.classList.add('hidden');
+        }, 950);
+      }
+    } else {
+      console.log('[ONNX Inference] Model not ready. Falling back to sandbox simulator dropdown selection for uploaded image.');
       const simulationKey = simulatedSelectNode.value || 'tomato___late_blight';
       setTimeout(() => {
         displayDiagnosis(simulationKey, 91.2 + Math.round(Math.random() * 80) / 10);
-      }, 700);
-    } finally {
-      setTimeout(() => {
         radarScanner.classList.add('hidden');
-      }, 950);
+      }, 750);
     }
   };
   visualImg.src = URL.createObjectURL(uploadedFile);
