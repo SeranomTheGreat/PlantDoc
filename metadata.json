@@ -1,0 +1,6 @@
+{
+  "name": "CropDocWeb",
+  "description": "Offline-first agricultural crop disease diagnostic assistant powered by on-device WebAssembly and WebCamera.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
